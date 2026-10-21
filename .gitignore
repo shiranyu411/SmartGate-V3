@@ -1,0 +1,32 @@
+.DS_Store
+._*
+
+/dist/
+/.tmp/
+/.gocache/
+/.smoke/
+/.devvm/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Editor / local env
+.env
+.env.*
+*.swp
+.idea/
+.vscode/
+
+# Local secrets (never commit)
+info.txt
+**/auth.json
+**/*secret*
+!scripts/secret-scan.sh
+!scripts/secret-scan.allow
+
+# Local-only backups (never commit)
+.local-backups/
+
+# Local independent review worktrees/archives (not for publish)
+.review/

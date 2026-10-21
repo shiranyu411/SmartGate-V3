@@ -1,0 +1,50 @@
+name: Source checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm --prefix frontend ci
+      - name: Backend and export tests
+        run: make test
+      - name: Architecture guard
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$DIFF_BASE"
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base=HEAD
+          fi
+          ARCHGUARD_BASE="$base" make archguard
+      - name: Frontend checks
+        run: make frontend-check
+      - name: FakeCore acceptance
+        run: make fakecore-e2e
+      - name: Credential scan
+        run: make secret-scan
+      - name: Archive acceptance report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fakecore-acceptance-report
+          path: .tmp/fakecore-acceptance-report.txt
+          if-no-files-found: ignore

@@ -1,0 +1,5 @@
+# SmartGate architecture guard ratchet v1
+# Initial public snapshot: composition-root default-core regression fixtures.
+# class<TAB>package<TAB>count
+G1_CORE_TOKEN	cmd/smartgate	4
+G4_CORE_ENUM	cmd/smartgate	3

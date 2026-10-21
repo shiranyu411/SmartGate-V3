@@ -1,0 +1,99 @@
+#!/bin/sh /etc/rc.common
+START=99
+STOP=10
+USE_PROCD=1
+EXTRA_COMMANDS="rescue rescue_status rescue_clear"
+EXTRA_HELP="	rescue		Enter SmartGate rescue mode
+	rescue_status	Show SmartGate rescue mode status
+	rescue_clear	Clear SmartGate rescue mode flag"
+
+SMARTGATE_BIN=${SMARTGATE_BIN:-/usr/bin/smartgate}
+SMARTGATE_DATA_DIR=${SMARTGATE_DATA_DIR:-/etc/smartgate}
+SMARTGATE_RUNTIME_DIR=${SMARTGATE_RUNTIME_DIR:-/tmp/smartgate}
+SMARTGATE_LISTEN=${SMARTGATE_LISTEN:-192.168.1.1:3000}
+SMARTGATE_STATIC_DIR=${SMARTGATE_STATIC_DIR:-/www/smartgate}
+SMARTGATE_CORS_ORIGIN=${SMARTGATE_CORS_ORIGIN:-}
+SMARTGATE_RESCUE_FLAG=${SMARTGATE_RESCUE_FLAG:-/etc/smartgate/smartgate-rescue.status}
+SMARTGATE_LEGACY_RESCUE_FLAG=${SMARTGATE_LEGACY_RESCUE_FLAG:-/tmp/smartgate/smartgate-rescue.status}
+SMARTGATE_DEPLOY_GATE=${SMARTGATE_DEPLOY_GATE:-/tmp/smartgate/deploy-scheduler-disabled}
+SMARTGATE_DEPLOY_JOURNAL=${SMARTGATE_DEPLOY_JOURNAL:-/root/smartgate-deployments/pending.json}
+SMARTGATE_DEPLOY_STARTING_JOURNAL=${SMARTGATE_DEPLOY_STARTING_JOURNAL:-/root/smartgate-deployments/pending.starting.json}
+SMARTGATE_DEPLOY_RECOVER=${SMARTGATE_DEPLOY_RECOVER:-/root/smartgate-deployments/deploy-recover}
+SMARTGATE_DEPLOY_LOCK=${SMARTGATE_DEPLOY_LOCK:-/root/smartgate-deployments/lock/owner}
+SMARTGATE_DEPLOY_RECOVERED_RUNNING=${SMARTGATE_DEPLOY_RECOVERED_RUNNING:-/root/smartgate-deployments/recovered-running}
+
+start_service() {
+	if [ -f "$SMARTGATE_DEPLOY_RECOVERED_RUNNING" ]; then
+		rm -f "$SMARTGATE_DEPLOY_RECOVERED_RUNNING"
+		pidof smartgate >/dev/null 2>&1 && return 0
+	fi
+	if [ -f "$SMARTGATE_DEPLOY_JOURNAL" ] || [ -f "$SMARTGATE_DEPLOY_STARTING_JOURNAL" ]; then
+		if [ "${SMARTGATE_DEPLOY_RECOVERY_ACTIVE:-0}" != 1 ] && [ -f "$SMARTGATE_DEPLOY_STARTING_JOURNAL" ]; then
+			[ -x "$SMARTGATE_DEPLOY_RECOVER" ] || { echo "SmartGate deployment recovery helper is missing." >&2; return 1; }
+			"$SMARTGATE_DEPLOY_RECOVER" --from-init || return 1
+			return 0
+		fi
+		owner_pid=$(sed -n '1p' "$SMARTGATE_DEPLOY_LOCK" 2>/dev/null || true)
+		owner_boot=$(sed -n '2p' "$SMARTGATE_DEPLOY_LOCK" 2>/dev/null || true)
+		owner_start=$(sed -n '3p' "$SMARTGATE_DEPLOY_LOCK" 2>/dev/null || true)
+		current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+		current_start=$(awk '{print $22}' "/proc/$owner_pid/stat" 2>/dev/null || true)
+		current_state=$(awk '{print $3}' "/proc/$owner_pid/stat" 2>/dev/null || true)
+		if [ "${SMARTGATE_DEPLOY_RECOVERY_ACTIVE:-0}" != 1 ] && ! { [ -n "$owner_pid" ] && [ "$owner_boot" = "$current_boot" ] && [ -n "$owner_start" ] && [ "$owner_start" = "$current_start" ] && [ "$current_state" != Z ] && kill -0 "$owner_pid" 2>/dev/null; }; then
+			[ -x "$SMARTGATE_DEPLOY_RECOVER" ] || { echo "SmartGate deployment recovery helper is missing." >&2; return 1; }
+			"$SMARTGATE_DEPLOY_RECOVER" --from-init || return 1
+			return 0
+		fi
+	fi
+	if [ -f "$SMARTGATE_RESCUE_FLAG" ] || [ -f "$SMARTGATE_LEGACY_RESCUE_FLAG" ]; then
+		echo "SmartGate rescue mode is active; service start is intentionally suppressed."
+		if ! "$SMARTGATE_BIN" rescue -data-dir "$SMARTGATE_DATA_DIR" -runtime-dir "$SMARTGATE_RUNTIME_DIR" enter; then
+			echo "SmartGate rescue cleanup failed; refusing to report a successful rescue start." >&2
+			return 1
+		fi
+		return 0
+	fi
+	procd_open_instance
+	procd_set_param command "$SMARTGATE_BIN" -data-dir "$SMARTGATE_DATA_DIR" -runtime-dir "$SMARTGATE_RUNTIME_DIR" -listen "$SMARTGATE_LISTEN"
+	if [ -n "$SMARTGATE_STATIC_DIR" ]; then
+		procd_append_param command -static-dir "$SMARTGATE_STATIC_DIR"
+	fi
+	if [ -n "$SMARTGATE_CORS_ORIGIN" ]; then
+		procd_append_param command -cors-origin "$SMARTGATE_CORS_ORIGIN"
+	fi
+	if [ -f "$SMARTGATE_DEPLOY_GATE" ]; then
+		procd_append_param command -scheduler-disabled
+	fi
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param limits nofile="4096 4096"
+	procd_close_instance
+}
+
+stop_service() {
+	return 0
+}
+
+service_triggers() {
+	procd_add_reload_trigger smartgate
+}
+
+rescue() {
+	procd_kill smartgate 2>/dev/null || true
+	attempt=0
+	while pidof smartgate >/dev/null 2>&1 && [ "$attempt" -lt 20 ]; do
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	pidof smartgate >/dev/null 2>&1 && { echo "SmartGate daemon did not stop before rescue cleanup." >&2; return 1; }
+	"$SMARTGATE_BIN" rescue -data-dir "$SMARTGATE_DATA_DIR" -runtime-dir "$SMARTGATE_RUNTIME_DIR" enter
+}
+
+rescue_status() {
+	"$SMARTGATE_BIN" rescue -data-dir "$SMARTGATE_DATA_DIR" -runtime-dir "$SMARTGATE_RUNTIME_DIR" status
+}
+
+rescue_clear() {
+	"$SMARTGATE_BIN" rescue -data-dir "$SMARTGATE_DATA_DIR" -runtime-dir "$SMARTGATE_RUNTIME_DIR" clear
+}

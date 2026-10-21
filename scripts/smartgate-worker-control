@@ -1,0 +1,217 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+CONFIG_DIR=${SMARTGATE_WORKER_CONFIG_DIR:-/etc/smartgate/workers}
+RUNTIME_DIR=${SMARTGATE_WORKER_RUNTIME_DIR:-/tmp/smartgate/workers}
+SYSTEM_ROOT=${SMARTGATE_WORKER_ROOT:-}
+SINGBOX_BIN=${SMARTGATE_SINGBOX_BIN:-$SYSTEM_ROOT/usr/bin/sing-box}
+XRAY_BIN=${SMARTGATE_XRAY_BIN:-$SYSTEM_ROOT/usr/bin/xray}
+SINGBOX_MIN=1.12
+
+usage() {
+  echo "usage: smartgate-worker-control {start|restart|stop|status} {w_sb_1|w_xr_1}" >&2
+  echo "       smartgate-worker-control {package-names|verify-prerequisites|legacy-metadata}" >&2
+  exit 2
+}
+
+version_at_least() {
+  have=$1
+  want=$2
+  have_major=${have%%.*}
+  have_rest=${have#*.}
+  have_minor=${have_rest%%.*}
+  want_major=${want%%.*}
+  want_rest=${want#*.}
+  want_minor=${want_rest%%.*}
+  case "$have_major:$have_minor:$want_major:$want_minor" in
+    *[!0-9:]*) return 1 ;;
+  esac
+  [ "$have_major" -gt "$want_major" ] || { [ "$have_major" -eq "$want_major" ] && [ "$have_minor" -ge "$want_minor" ]; }
+}
+
+# Cores are optional individually; at least one must be installed and every
+# installed one must answer its version command (the daemon probes the same).
+verify_prerequisites() {
+  cores=0
+  if [ -x "$SINGBOX_BIN" ]; then
+    singbox_output=$("$SINGBOX_BIN" version 2>/dev/null) || { echo "sing-box version check failed" >&2; return 1; }
+    singbox_version=$(printf '%s\n' "$singbox_output" | sed -n 's/.*[Vv]ersion[[:space:]]\([0-9][0-9.]*\).*/\1/p' | sed -n '1p')
+    [ -n "$singbox_version" ] || { echo "could not parse sing-box version" >&2; return 1; }
+    version_at_least "$singbox_version" "$SINGBOX_MIN" || { echo "sing-box $singbox_version is below required $SINGBOX_MIN" >&2; return 1; }
+    cores=$((cores + 1))
+  else
+    echo "sing-box binary not installed: $SINGBOX_BIN (SmartNodes cannot select this core)" >&2
+  fi
+  if [ -x "$XRAY_BIN" ]; then
+    "$XRAY_BIN" version >/dev/null 2>&1 || { echo "Xray version check failed" >&2; return 1; }
+    cores=$((cores + 1))
+  else
+    echo "Xray binary not installed: $XRAY_BIN (SmartNodes cannot select this core)" >&2
+  fi
+  [ "$cores" -gt 0 ] || { echo "no execution core is installed" >&2; return 1; }
+}
+
+case "${1:-}" in
+  package-names)
+    [ "$#" -eq 1 ] || usage
+    printf '%s\n' 'sing-box xray-core'
+    exit 0
+    ;;
+  verify-prerequisites)
+    [ "$#" -eq 1 ] || usage
+    verify_prerequisites
+    exit $?
+    ;;
+  legacy-metadata)
+    [ "$#" -eq 1 ] || usage
+    printf '%s\n' \
+      '/etc/init.d/sing-box' \
+      'sing-box' \
+      '/etc/sing-box/config.json' \
+      '/etc/sing-box/config.json.owner' \
+      '/var/run/smartgate-singbox.owner'
+    exit 0
+    ;;
+esac
+
+[ "$#" -eq 2 ] || usage
+action=$1
+worker_id=$2
+
+case "$worker_id" in
+  w_sb_1)
+    binary=$SINGBOX_BIN
+    core=sing-box
+    ;;
+  w_xr_1)
+    binary=$XRAY_BIN
+    core=xray
+    ;;
+  *) usage ;;
+esac
+
+config=$CONFIG_DIR/$worker_id.json
+pidfile=$RUNTIME_DIR/$worker_id.pid
+owner_file=$RUNTIME_DIR/$worker_id.owner
+owner=owner=smartgate:worker-service:$worker_id
+
+read_worker_pid() {
+  pid=$(sed -n '1p' "$pidfile" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+pid_matches_worker() {
+  target_pid=$1
+  command_line=
+  if [ -r "/proc/$target_pid/cmdline" ]; then
+    command_line=$(tr '\000' ' ' <"/proc/$target_pid/cmdline" 2>/dev/null || true)
+  elif command -v ps >/dev/null 2>&1; then
+    command_line=$(ps -p "$target_pid" -o command= 2>/dev/null || true)
+  fi
+  case "$command_line" in
+    *"$binary"*"$config"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+worker_running() {
+  read_worker_pid || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  pid_matches_worker "$pid"
+}
+
+clear_runtime_state() {
+  rm -f "$pidfile" "$owner_file"
+}
+
+# OpenWrt busybox sleep rejects fractional seconds, and under set -e that
+# failure would abort the whole script (seen on the 25.12 devvm: every stop
+# or restart of a running Worker exited 1). Fall back to a whole second there
+# and bound every wait by wall-clock deadline rather than iteration count.
+pause() {
+  sleep 0.1 2>/dev/null || sleep 1
+}
+
+wait_until() {
+  wait_deadline=$(( $(date +%s) + $1 ))
+  shift
+  while ! "$@"; do
+    [ "$(date +%s)" -lt "$wait_deadline" ] || return 1
+    pause
+  done
+}
+
+worker_gone() {
+  ! kill -0 "$1" 2>/dev/null || ! pid_matches_worker "$1"
+}
+
+stop_worker() {
+  if ! worker_running; then
+    clear_runtime_state
+    return 0
+  fi
+  target_pid=$pid
+  kill "$target_pid" 2>/dev/null || true
+  if ! wait_until 5 worker_gone "$target_pid"; then
+    kill -KILL "$target_pid" 2>/dev/null || true
+    wait_until 3 worker_gone "$target_pid" || true
+  fi
+  clear_runtime_state
+  echo "$worker_id stopped"
+}
+
+start_worker() {
+  if worker_running; then
+    echo "$worker_id running"
+    return 0
+  fi
+  clear_runtime_state
+  [ -x "$binary" ] || { echo "$core binary is unavailable" >&2; return 1; }
+  [ -s "$config" ] || { echo "$worker_id has no active config" >&2; return 1; }
+  mkdir -p "$RUNTIME_DIR"
+  printf '%s\n' "$owner" >"$owner_file.tmp"
+  mv "$owner_file.tmp" "$owner_file"
+  case "$worker_id" in
+    w_sb_1) set -- run -c "$config" ;;
+    w_xr_1) set -- run -config "$config" ;;
+  esac
+  if command -v start-stop-daemon >/dev/null 2>&1; then
+    start-stop-daemon -S -b -m -p "$pidfile" -x "$binary" -- "$@"
+  else
+    "$binary" "$@" </dev/null >/dev/null 2>&1 &
+    printf '%s\n' "$!" >"$pidfile"
+  fi
+  if ! wait_until 8 worker_running; then
+    stop_worker >/dev/null 2>&1 || true
+    echo "$worker_id failed to start" >&2
+    return 1
+  fi
+  echo "$worker_id running"
+}
+
+case "$action" in
+  start) start_worker ;;
+  restart)
+    stop_worker >/dev/null
+    start_worker
+    ;;
+  stop) stop_worker ;;
+  status)
+    if worker_running; then
+      echo "$worker_id running"
+    else
+      # start-stop-daemon writes its PID before exec. A concurrent status
+      # observation can see that launcher rather than the core briefly; only
+      # lifecycle commands may remove the PID/owner files, or a healthy child
+      # can become untracked while it is starting.
+      echo "$worker_id stopped"
+      exit 1
+    fi
+    ;;
+  *) usage ;;
+esac
