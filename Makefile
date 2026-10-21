@@ -100,9 +100,10 @@ release: build frontend-build
 	cp docs/CUTOVER.md dist/release/docs/CUTOVER.md
 	cp docs/CHANGELOG.md dist/release/docs/CHANGELOG.md
 	cp LICENSE dist/release/LICENSE
+	cp NOTICE dist/release/NOTICE
 	cp README.md dist/release/README.md
-	cd dist/release && find smartgate configs scripts libexec www version.json LICENSE README.md docs -type f -print | sort | xargs sha256sum > SHA256SUMS
-	cd dist/release && tar -czf ../smartgate-openwrt-aarch64.tar.gz smartgate configs scripts libexec www version.json SHA256SUMS LICENSE README.md docs
+	cd dist/release && find smartgate configs scripts libexec www version.json LICENSE NOTICE README.md docs -type f -print | sort | xargs sha256sum > SHA256SUMS
+	cd dist/release && tar -czf ../smartgate-openwrt-aarch64.tar.gz smartgate configs scripts libexec www version.json SHA256SUMS LICENSE NOTICE README.md docs
 
 # Desensitized source tree for public GitHub (no local caches, no VM material).
 # Public snapshots contain no private operational records or development history.

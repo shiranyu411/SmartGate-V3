@@ -23,4 +23,9 @@ make release
 
 安装与升级见 [部署文档](docs/RELEASE_RUNBOOK.md)，接口见 [API 文档](docs/API_CONTRACT.md)。管理面板仅供可信局域网使用。
 
-[MIT License](LICENSE)
+## 许可证与署名
+
+SmartGate V3 的原创项目代码采用 [Apache License 2.0](LICENSE) 授权。原项目作者及维护者：[@shiranyu411](https://github.com/shiranyu411)。
+
+再分发源代码、安装包或修改后的衍生作品时，应遵守 Apache-2.0 的版权声明、变更说明及 [NOTICE](NOTICE) 署名保留要求。第三方素材与依赖仍遵循各自许可证；仅私下运行软件不要求公开署名。
+
