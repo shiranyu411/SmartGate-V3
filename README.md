@@ -9,7 +9,7 @@
 
 ## 构建
 
-需要 Go 1.26.1+、Node.js 22+、npm。默认构建 Linux ARM64 版本。
+需要 Go 1.26.1+、Node.js 22+、npm；测试另需 Python 3 和 ripgrep。默认构建 Linux ARM64 版本。
 
 ```sh
 npm --prefix frontend ci
